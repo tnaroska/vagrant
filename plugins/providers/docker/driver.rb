@@ -3,6 +3,7 @@
 
 require "json"
 require "log4r"
+require 'tmpdir'
 
 require_relative "./driver/compose"
 
@@ -26,38 +27,23 @@ module VagrantPlugins
         args = Array(opts[:extra_args])
         args << dir
         opts = {with_stderr: true}
-        result = execute('docker', 'build', *args, **opts, &block)
-        # Check for the new output format 'writing image sha256...'
-        # In this case, docker buildkit is enabled. Its format is different
-        # from standard docker
-        matches = result.scan(/writing image .+:([^\s]+)/i).last
-        if !matches
-          if podman?
-            # Check for podman format when it is emulating docker CLI.
-            # Podman outputs the full hash of the container on
-            # the last line after a successful build.
-            match = result.split.select { |str| str.match?(/[0-9a-z]{64}/) }.last
-            return match[0..7] unless match.nil?
-          else
-            matches = result.scan(/Successfully built (.+)$/i).last
-          end
+        result = Dir.mktmpdir do |tmpdir|
+          # Have docker write the built image's sha256 id into a temp file
+          iidfile = "#{tmpdir}/iidfile"
+          execute('docker', 'build', '--iidfile', iidfile, *args, **opts, &block)
+          File.read(iidfile)
+        end
 
-          if !matches
-            # This will cause a stack trace in Vagrant, but it is a bug
-            # if this happens anyways.
-            raise Errors::BuildError, result: result
-          end
+        # Extract id part from full sha256:xxx
+        matches = result.scan(/.+:([^\s]+)/i).last
+        if !matches
+          # This will cause a stack trace in Vagrant, but it is a bug
+          # if this happens anyways.
+          raise Errors::BuildError, result: result
         end
 
         # Return the matched group `id`
         matches[0].strip
-      end
-
-      # Check if podman emulating docker CLI is enabled.
-      #
-      # @return [Bool]
-      def podman?
-        execute('docker', '--version').include?("podman")
       end
 
       def create(params, **opts, &block)
